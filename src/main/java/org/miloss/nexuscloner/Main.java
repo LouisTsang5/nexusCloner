@@ -8,17 +8,14 @@ package org.miloss.nexuscloner;
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
+
+import java.io.*;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
@@ -139,6 +136,21 @@ public class Main {
 
     }
 
+    static Wrapper ReadIndex(File indexFile, File outputFolder) throws FileNotFoundException {
+        Wrapper wrapper = new Wrapper();
+        if(indexFile.exists() && !indexFile.isDirectory()) {
+            Scanner s = new Scanner(indexFile);
+            while (s.hasNext()) {
+                String url = s.nextLine();
+                String relativePath = url.replace(sourceUrl, "");
+                String AbsolutePath = outputFolder.getAbsolutePath() + File.separator + relativePath;
+                wrapper.data.add(new Container(url, AbsolutePath));
+            }
+            s.close();
+        }
+        return wrapper;
+    }
+
     static boolean running = true;
     static ArrayList<Container> failures = new ArrayList<>();
 
@@ -146,6 +158,10 @@ public class Main {
     static String auth = null;
     static String cookie = null;
     static ConcurrentLinkedQueue<Container> filesToDownload = new ConcurrentLinkedQueue<>();
+    static ArrayList<String> progress = new ArrayList<>();
+    static String lastProgress = "";
+    static boolean isRetrace = false;
+    static FileWriter fw;
 
     public static void main(String[] args) throws Exception {
 
@@ -165,6 +181,24 @@ public class Main {
 
         CommandLineParser parser = new DefaultParser();
         CommandLine parse = parser.parse(opts, args);
+
+        //read last progress
+        File progressFile = new File("progress.bin");
+        if(progressFile.exists() && !progressFile.isDirectory()) {
+            Scanner s = new Scanner(progressFile);
+            while (s.hasNext()) {
+                progress.add(s.next());
+            }
+            s.close();
+        }
+        //get last progress
+        if (progress.size() > 0) {
+            lastProgress = progress.get(progress.size() - 1);
+            isRetrace = true;
+        }
+
+        //Clear last progress
+        progress.clear();
 
         initSsl();
         if (parse.hasOption("help") 
@@ -203,22 +237,46 @@ public class Main {
         outputFolder.mkdirs();
         Kryo kryo = new Kryo();
         if (parse.hasOption("index")) {
-            process(url, outputFolder);
+            Exception exception = null;
+            try {
+                process(url, outputFolder);
+            } catch (Exception ex) {
+                exception = ex;
+            }
+
             //store the index
             Iterator<Container> iterator = filesToDownload.iterator();
-            ArrayList<Container> data = new ArrayList<>();
+            //ArrayList<Container> data = new ArrayList<>();
+            ArrayList<String> urls = new ArrayList<>();
+//            while (iterator.hasNext()) {
+//                data.add(iterator.next());
+//            }
             while (iterator.hasNext()) {
-                data.add(iterator.next());
+                urls.add(iterator.next().url);
             }
 
             Wrapper d = new Wrapper();
-            d.data = data;
+            //d.data = data;
             // ...
-            Output output = new Output(new FileOutputStream("index.bin"));
+            FileWriter fw = new FileWriter("index.bin", true);
+            for (String urlString : urls) {
+                fw.write(urlString + System.lineSeparator());
+            }
+            fw.close();
 
-            kryo.writeObject(output, d);
-            output.close();
-
+            FileWriter fw1 = new FileWriter("progress.bin", true);
+            for (String progressUrl : progress) {
+                fw1.write(progressUrl + System.lineSeparator());
+            }
+            fw1.close();
+//            Output output = new Output(new FileOutputStream("index.bin"));
+//
+//            //kryo.writeObject(output, d);
+//            kryo.writeObject(output, urls);
+//            output.close();
+            if (exception != null) {
+                throw exception;
+            }
         }
         if (parse.hasOption("download")) {
             if (filesToDownload.isEmpty()) {
@@ -227,9 +285,10 @@ public class Main {
                     System.out.println("index.bin is missing, run with the -index option first.");
                     return;
                 }
-                Input input = new Input(new FileInputStream(f));
-                Wrapper someObject = kryo.readObject(input, Wrapper.class);
-                input.close();
+                //Input input = new Input(new FileInputStream(f));
+                //Wrapper someObject = kryo.readObject(input, Wrapper.class);
+                Wrapper someObject = ReadIndex(f, outputFolder);
+                //input.close();
                 filesToDownload.addAll(someObject.data);
             }
             System.out.println(filesToDownload.size() + " files to download");
@@ -278,19 +337,30 @@ public class Main {
             doc = Jsoup.connect(url).get();
         }
 
+
+
         for (Element e : doc.select("a")) {
-            String link = e.attr("href");
-            if (!ignore(link)) {
-                if (isDirectory(link)) {
-                    process(link,
-                            outputFolder);
+            //skip the directory if the current directory is not the last directory
+            if (isRetrace)
+                if (!Objects.equals(url, sourceUrl))
+                    if (!lastProgress.contains(url))
+                        continue;
+
+            //end the retrace if the current directory is the last directory
+            if (Objects.equals(url, lastProgress))
+                isRetrace = false;
+
+            String link = url + e.attr("href");
+            if (!ignore(e.attr("href"))) {
+                if (isDirectory(e.attr("href"))) {
+                    process(link, outputFolder);
                 } else {
                     //download the file
                     URL urlFile = new URL(link);
                     String relativePath = link.replace(sourceUrl, "");
                     File outputFile = new File(outputFolder.getAbsolutePath() + File.separator + relativePath);
-
-                    filesToDownload.add(new Container(link, outputFile.getAbsolutePath()));
+                    progress.add(url);
+                    filesToDownload.add(new Container(e.attr("href"), outputFile.getAbsolutePath()));
                     //FileUtils.copyURLToFile(urlFile, outputFile );
                 }
                 //System.out.println(link);
